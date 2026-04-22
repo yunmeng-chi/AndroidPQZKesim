@@ -746,43 +746,68 @@ class MainActivity : AppCompatActivity(), CameraBridgeViewBase.CvCameraViewListe
         macW: ByteArray,
         rDynamic: ByteArray
     ): Triple<ByteArray, String, ByteArray> = withContext(Dispatchers.IO) {
-        // 后端地址（让后端同学给你IP+端口，直接替换）
-        val url = URL("http://192.168.254.129:8000/api/v1/auth/challenge")
+        // 后端地址（后端IP+端口，直接替换）
+        val url = URL("https://ecfcd8400506d872-211-83-126-144.serveousercontent.com/api/v1/auth/challenge")
         val conn = url.openConnection() as HttpURLConnection
 
         conn.apply {
             requestMethod = "POST"
             setRequestProperty("Content-Type", "application/json")
+            setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+            setRequestProperty("Accept", "application/json")
             doOutput = true
-            connectTimeout = 8000
-            readTimeout = 8000
+            connectTimeout = 10000
+            readTimeout = 10000
         }
 
-        // 构建请求体（完全按开发组分工3.0字段）
+        // 构建请求体（按后端要求的字段名）
         val json = JSONObject().apply {
-            put("w_total", Base64.encodeToString(wTotal, Base64.NO_WRAP))
-            put("w_sec", Base64.encodeToString(wSec, Base64.NO_WRAP))
-            put("mac_w", Base64.encodeToString(macW, Base64.NO_WRAP))
-            put("r_dynamic", Base64.encodeToString(rDynamic, Base64.NO_WRAP)) // ✅ 替换h_ctx
-            put("domain_id", DOMAIN_ID) // ✅ 新增domain_id
+            put("W", Base64.encodeToString(wTotal, Base64.NO_WRAP)) // w_total -> W
+            put("W_sec", Base64.encodeToString(wSec, Base64.NO_WRAP)) // w_sec -> W_sec
+            put("MAC_W", Base64.encodeToString(macW, Base64.NO_WRAP)) // mac_w -> MAC_W
+            put("H_ctx", Base64.encodeToString(rDynamic, Base64.NO_WRAP)) // 补充H_ctx字段
+            put("e_uicc_id", "test_euicc_id") // 补充e_uicc_id字段
+            put("r_dynamic", Base64.encodeToString(rDynamic, Base64.NO_WRAP)) // 保留r_dynamic
+            put("domain_id", DOMAIN_ID) // 保留domain_id
         }
+
+        Log.d("PQZK-Network", "发送挑战请求: ${json.toString().take(100)}...")
 
         // 发送请求
-        conn.outputStream.use { os ->
-            os.write(json.toString().toByteArray())
-            os.flush()
+        try {
+            conn.outputStream.use { os ->
+                os.write(json.toString().toByteArray())
+                os.flush()
+            }
+
+            // 检查响应码
+            val responseCode = conn.responseCode
+            Log.d("PQZK-Network", "响应码: $responseCode")
+
+            if (responseCode == 200) {
+                // 解析后端返回（严格按分工文档字段）
+                val response = conn.inputStream.bufferedReader().readText()
+                Log.d("PQZK-Network", "响应内容: ${response.take(100)}...")
+                val res = JSONObject(response)
+
+                val cSeed = Base64.decode(res.getString("c_seed"), Base64.NO_WRAP)
+                val sessionId = res.getString("session_id")
+                val m1 = Base64.decode(res.getString("m1"), Base64.NO_WRAP)
+
+                conn.disconnect()
+                return@withContext Triple(cSeed, sessionId, m1)
+            } else {
+                // 读取错误响应
+                val errorResponse = conn.errorStream?.bufferedReader()?.readText() ?: ""
+                Log.e("PQZK-Network", "请求失败: $responseCode, 错误: $errorResponse")
+                throw Exception("后端请求失败: $responseCode, $errorResponse")
+            }
+        } catch (e: Exception) {
+            Log.e("PQZK-Network", "网络请求异常: ${e.message}", e)
+            throw e
+        } finally {
+            conn.disconnect()
         }
-
-        // 解析后端返回（严格按分工文档字段）
-        val response = conn.inputStream.bufferedReader().readText()
-        val res = JSONObject(response)
-
-        val cSeed = Base64.decode(res.getString("c_seed"), Base64.NO_WRAP)
-        val sessionId = res.getString("session_id")
-        val m1 = Base64.decode(res.getString("m1"), Base64.NO_WRAP)
-
-        conn.disconnect()
-        return@withContext Triple(cSeed, sessionId, m1)
     }
 
     /**
@@ -795,15 +820,17 @@ class MainActivity : AppCompatActivity(), CameraBridgeViewBase.CvCameraViewListe
         m2: ByteArray,
         sessionId: String
     ): Boolean = withContext(Dispatchers.IO) {
-        val url = URL("http://192.168.254.129:8000/api/v1/auth/verify")
+        val url = URL("https://ecfcd8400506d872-211-83-126-144.serveousercontent.com/api/v1/auth/verify")
         val conn = url.openConnection() as HttpURLConnection
 
         conn.apply {
             requestMethod = "POST"
             setRequestProperty("Content-Type", "application/json")
+            setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+            setRequestProperty("Accept", "application/json")
             doOutput = true
-            connectTimeout = 8000
-            readTimeout = 8000
+            connectTimeout = 10000
+            readTimeout = 10000
         }
 
         // 请求体（完全按分工文档）
@@ -814,15 +841,35 @@ class MainActivity : AppCompatActivity(), CameraBridgeViewBase.CvCameraViewListe
             put("domain_id", DOMAIN_ID) // ✅ 新增domain_id
         }
 
-        conn.outputStream.use { os ->
-            os.write(json.toString().toByteArray())
-            os.flush()
-        }
+        Log.d("PQZK-Network", "发送验证请求: sessionId=${sessionId.take(8)}...")
 
-        // 200=成功
-        val success = conn.responseCode == 200
-        conn.disconnect()
-        return@withContext success
+        try {
+            conn.outputStream.use { os ->
+                os.write(json.toString().toByteArray())
+                os.flush()
+            }
+
+            // 检查响应码
+            val responseCode = conn.responseCode
+            Log.d("PQZK-Network", "验证响应码: $responseCode")
+
+            if (responseCode == 200) {
+                // 读取响应内容
+                val response = conn.inputStream.bufferedReader().readText()
+                Log.d("PQZK-Network", "验证响应: ${response.take(100)}...")
+                return@withContext true
+            } else {
+                // 读取错误响应
+                val errorResponse = conn.errorStream?.bufferedReader()?.readText() ?: ""
+                Log.e("PQZK-Network", "验证失败: $responseCode, 错误: $errorResponse")
+                return@withContext false
+            }
+        } catch (e: Exception) {
+            Log.e("PQZK-Network", "验证请求异常: ${e.message}", e)
+            return@withContext false
+        } finally {
+            conn.disconnect()
+        }
     }
 
     // 【设备注册流程】
