@@ -1,0 +1,175 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.coordinatorlayout.widget.CoordinatorLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:opencv="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#F9FAFB">
+
+    <FrameLayout
+        android:id="@+id/camera_container"
+        android:layout_width="280dp"
+        android:layout_height="280dp"
+        android:layout_gravity="center"
+        android:elevation="10dp"
+        android:background="#000000"
+        android:visibility="gone">
+
+        <org.opencv.android.JavaCameraView
+            android:id="@+id/java_camera_view"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:visibility="visible"/>
+
+        <RelativeLayout
+            android:id="@+id/face_scan_overlay"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="@android:color/transparent">
+
+            <View
+                android:id="@+id/scan_window"
+                android:layout_width="280dp"
+                android:layout_height="280dp"
+                android:layout_centerInParent="true"
+                android:background="@drawable/face_scan_frame" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_below="@id/scan_window"
+                android:layout_centerHorizontal="true"
+                android:layout_marginTop="24dp"
+                android:text="请将面部对准扫描框"
+                android:textColor="#FFFFFF"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+        </RelativeLayout>
+    </FrameLayout>
+
+    <LinearLayout
+        android:id="@+id/business_ui_layer"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:padding="20dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="认证中心"
+            android:textSize="22sp"
+            android:textStyle="bold"
+            android:textColor="#1F2937"
+            android:layout_marginBottom="20dp"
+            android:layout_marginTop="10dp"/>
+
+        <androidx.cardview.widget.CardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            app:cardCornerRadius="16dp"
+            app:cardElevation="4dp"
+            android:layout_marginBottom="24dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="20dp"
+                android:background="#FFFFFF">
+
+                <TextView
+                    android:id="@+id/tv_eid"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="EID: 8986000000000000001"
+                    android:textStyle="bold"
+                    android:textColor="#1F2937"
+                    android:textSize="18sp" />
+
+                <TextView
+                    android:id="@+id/tv_reg_status"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="● 状态：已注册"
+                    android:textColor="#10B981"
+                    android:textSize="14sp" />
+
+                <TextView
+                    android:id="@+id/tv_last_auth_time"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="最后认证：2026-04-12 14:30"
+                    android:textColor="#6B7280"
+                    android:textSize="12sp" />
+            </LinearLayout>
+        </androidx.cardview.widget.CardView>
+
+        <ProgressBar
+            android:id="@+id/auth_progress"
+            style="?android:attr/progressBarStyleHorizontal"
+            android:layout_width="match_parent"
+            android:layout_height="8dp"
+            android:layout_marginBottom="20dp"
+            android:progressDrawable="@drawable/custom_progress_bar"
+            android:progress="0"
+            android:visibility="invisible" />
+
+        <Button
+            android:id="@+id/btn_run_test"
+            android:layout_width="match_parent"
+            android:layout_height="56dp"
+            android:text="开启抗量子身份认证"
+            android:background="@drawable/btn_primary_gradient"
+            app:backgroundTint="@null"
+            android:textAllCaps="false"
+            android:textColor="#FFFFFF"
+            android:layout_marginBottom="12dp" />
+
+        <Button
+            android:id="@+id/btn_quick_biz"
+            android:layout_width="match_parent"
+            android:layout_height="56dp"
+            android:text="快速办理业务"
+            android:enabled="false"
+            android:textAllCaps="false"
+            android:textColor="#FFFFFF"
+            android:layout_marginBottom="24dp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="实时安全审计"
+            android:textColor="#6B7280"
+            android:textSize="14sp"
+            android:layout_marginBottom="8dp" />
+
+        <androidx.cardview.widget.CardView
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            app:cardCornerRadius="12dp"
+            app:cardElevation="0dp"
+            app:cardBackgroundColor="#111827">
+
+            <ScrollView
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:padding="12dp">
+
+                <TextView
+                    android:id="@+id/tv_audit_log"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="> 系统就绪，等待认证触发...\n"
+                    android:textColor="#10B981"
+                    android:fontFamily="monospace"
+                    android:textSize="12sp"
+                    android:lineSpacingExtra="4dp" />
+            </ScrollView>
+        </androidx.cardview.widget.CardView>
+    </LinearLayout>
+</androidx.coordinatorlayout.widget.CoordinatorLayout>

@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="16dp"
+    android:background="#F3F4F6">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="JNI 接口手动测试"
+        android:textSize="20sp"
+        android:textStyle="bold"
+        android:textColor="#111827"
+        android:layout_marginBottom="16dp"/>
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="选择接口"
+        android:textSize="12sp"
+        android:layout_marginBottom="4dp"/>
+
+    <Spinner
+        android:id="@+id/spinner_jni_methods"
+        android:layout_width="match_parent"
+        android:layout_height="48dp"
+        android:background="@android:drawable/btn_dropdown"
+        android:layout_marginBottom="16dp"/>
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="输入参数 (Hex 字符串)"
+        android:textSize="12sp"
+        android:layout_marginBottom="4dp"/>
+
+    <EditText
+        android:id="@+id/et_jni_input"
+        android:layout_width="match_parent"
+        android:layout_height="100dp"
+        android:gravity="top"
+        android:hint="例如: 010203... (十六进制)"
+        android:importantForAutofill="no"
+        android:inputType="textNoSuggestions"
+        android:background="@android:color/white"
+        android:padding="8dp"
+        android:fontFamily="monospace"
+        android:textSize="14sp"/>
+
+    <Button
+        android:id="@+id/btn_call_jni"
+        android:layout_width="match_parent"
+        android:layout_height="56dp"
+        android:layout_marginTop="16dp"
+        android:text="执行 JNI 调用"
+        android:backgroundTint="#2563EB"
+        android:textColor="#FFFFFF"/>
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="返回结果"
+        android:layout_marginTop="20dp"
+        android:textSize="12sp"/>
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:background="#111827"
+        android:layout_marginTop="4dp"
+        android:padding="8dp">
+        <TextView
+            android:id="@+id/tv_jni_result"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="等待调用..."
+            android:textColor="#10B981"
+            android:fontFamily="monospace"
+            android:textSize="13sp"/>
+    </ScrollView>
+
+    <TextView
+        android:id="@+id/tv_jni_time"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="耗时: -- ms"
+        android:textAlignment="viewEnd"
+        android:textSize="12sp"
+        android:layout_marginTop="4dp"/>
+</LinearLayout>
