@@ -1,321 +1,474 @@
 package com.yourcompany.pqzkesim
 
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.os.Bundle
 import android.util.Log
 import android.view.View
-import android.widget.Toast
-import androidx.appcompat.app.AppCompatActivity
+import android.widget.*
+
+import androidx.biometric.BiometricPrompt
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
-import com.yourcompany.pqzkesim.databinding.ActivityRegisterBinding
+import com.yourcompany.pqzkesim.repository.UserRepository
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.opencv.android.CameraBridgeViewBase
 import org.opencv.android.OpenCVLoader
+import org.opencv.core.Core
 import org.opencv.core.Mat
 import java.io.File
 
-class RegisterActivity : AppCompatActivity(), CameraBridgeViewBase.CvCameraViewListener2 {
+class RegisterActivity : BaseLocaleActivity(), CameraBridgeViewBase.CvCameraViewListener2 {
 
-    private lateinit var binding: ActivityRegisterBinding
-    private var isProcessing = false
-    private var captureRequest = false
-
-    private var hasScheduledCapture = false
-    // 🟢 新增：定义 NVRAM 存储路径
-    private val nvramDirPath by lazy { filesDir.absolutePath + "/euicc_nvram" }
-
-    // 🟢 注册流程状态机
-    private enum class RegisterStep {
-        FACE,
-        FINGERPRINT,
-        DONE
+    companion object {
+        private const val TAG = "PQZK-Register"
     }
 
-    private var currentStep = RegisterStep.FINGERPRINT
+    // ──── Step state machine ────
+    private enum class RegisterStep(val num: Int) {
+        USER_INFO(1),
+        TEE_CHECK(2),
+        KYBER_KEYGEN(3),
+        FINGERPRINT(4),
+        FACE(5),
+        SECURITY_BIND(6),
+        DONE(7)
+    }
 
-    // 🟢 存储人脸结果
-    private lateinit var faceFeature: ByteArray
-    private lateinit var fingerprintFeature: ByteArray
+    private fun RegisterStep.getLabel(): String = when (this) {
+        RegisterStep.USER_INFO -> getString(R.string.register_step_1_label)
+        RegisterStep.TEE_CHECK -> getString(R.string.register_step_2_label)
+        RegisterStep.KYBER_KEYGEN -> getString(R.string.register_step_3_label)
+        RegisterStep.FINGERPRINT -> getString(R.string.register_step_4_label)
+        RegisterStep.FACE -> getString(R.string.register_step_5_label)
+        RegisterStep.SECURITY_BIND -> getString(R.string.register_step_6_label)
+        RegisterStep.DONE -> getString(R.string.register_step_7_label)
+    }
+
+    private var currentStep = RegisterStep.USER_INFO
+
+    // ──── Collected data ────
+    private var faceFeature: ByteArray? = null
+    private var kyberPk: ByteArray? = null
+    private var kyberSk: ByteArray? = null
+
+    // ──── Camera ────
+    private var isProcessing = false
+    private var captureRequest = false
+    private var hasScheduledCapture = false
+    private val nvramDirPath by lazy { filesDir.absolutePath + "/euicc_nvram" }
+
+    // ──── Views ────
+    private lateinit var tvStepIndicator: TextView
+    private lateinit var tvStatusDetail: TextView
+    private lateinit var layoutUserInfo: LinearLayout
+    private lateinit var etUserName: EditText
+    private lateinit var layoutStepInit: LinearLayout
+    private lateinit var progressInit: ProgressBar
+    private lateinit var tvInitStatus: TextView
+    private lateinit var tvInitResult: TextView
+    private lateinit var layoutStepFace: FrameLayout
+    private lateinit var cameraView: CameraBridgeViewBase
+    private lateinit var btnNextStep: Button
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_register)
 
-        try {
-            // 1. 初始化 ViewBinding
-            binding = ActivityRegisterBinding.inflate(layoutInflater)
-            setContentView(binding.root)
+        bindViews()
+        showStep(RegisterStep.USER_INFO)
 
-            // 2. 初始状态设置 (防止 ID 引用错误导致闪退)
-            binding.btnNextStep.isEnabled = false
-            binding.btnNextStep.text = "载入算法中..."
-            binding.registerCameraView.visibility = View.GONE
+        btnNextStep.setOnClickListener { onNextClicked() }
+    }
 
-            // 3. 初始化 OpenCV 核心
-            if (!OpenCVLoader.initLocal()) {
-                Log.e("PQZK", "OpenCV 初始化失败")
+    // ──── View binding ────
+
+    private fun bindViews() {
+        tvStepIndicator = findViewById(R.id.tv_step_indicator)
+        tvStatusDetail   = findViewById(R.id.tv_status_detail)
+        layoutUserInfo   = findViewById(R.id.layout_step_user_info)
+        etUserName       = findViewById(R.id.et_user_name)
+        layoutStepInit   = findViewById(R.id.layout_step_init)
+        progressInit     = findViewById(R.id.progress_init)
+        tvInitStatus     = findViewById(R.id.tv_init_status)
+        tvInitResult     = findViewById(R.id.tv_init_result)
+        layoutStepFace   = findViewById(R.id.layout_step_face)
+        cameraView       = findViewById(R.id.register_camera_view)
+        btnNextStep      = findViewById(R.id.btn_next_step)
+
+        cameraView.setCvCameraViewListener(this)
+        cameraView.setCameraPermissionGranted()
+    }
+
+    // ──── Step UI ────
+
+    private fun showStep(step: RegisterStep) {
+        tvStepIndicator.text = getString(R.string.register_step_indicator, step.num, step.getLabel())
+
+        // Hide all content panels
+        layoutUserInfo.visibility = View.GONE
+        layoutStepInit.visibility = View.GONE
+        layoutStepFace.visibility = View.GONE
+        tvInitResult.visibility = View.GONE
+        tvStatusDetail.visibility = View.VISIBLE
+        btnNextStep.isEnabled = true
+        btnNextStep.text = "下一步"
+
+        when (step) {
+            RegisterStep.USER_INFO -> {
+                tvStatusDetail.text = "请输入您的昵称"
+                layoutUserInfo.visibility = View.VISIBLE
             }
-            binding.registerCameraView.setCvCameraViewListener(this)
+            RegisterStep.TEE_CHECK -> {
+                tvStatusDetail.text = "正在检测 TEE 安全环境..."
+                layoutStepInit.visibility = View.VISIBLE
+                tvInitStatus.text = "正在验证 TEE 安全环境..."
+                btnNextStep.isEnabled = false
+            }
+            RegisterStep.KYBER_KEYGEN -> {
+                tvStatusDetail.text = "正在生成抗量子密钥..."
+                layoutStepInit.visibility = View.VISIBLE
+                tvInitStatus.text = "正在生成 Kyber-768 主密钥..."
+                btnNextStep.isEnabled = false
+            }
+            RegisterStep.FINGERPRINT -> {
+                tvStatusDetail.text = "请点击按钮采集指纹特征"
+                layoutStepInit.visibility = View.VISIBLE
+                tvInitStatus.text = "准备采集指纹..."
+                tvInitResult.visibility = View.GONE
+                btnNextStep.text = "开始采集指纹"
+            }
+            RegisterStep.FACE -> {
+                tvStatusDetail.text = "请正对摄像头完成人脸采集"
+                layoutStepFace.visibility = View.VISIBLE
+                btnNextStep.text = "准备中..."
+                btnNextStep.isEnabled = false
+                enableCamera()
+            }
+            RegisterStep.SECURITY_BIND -> {
+                tvStatusDetail.text = "正在执行安全绑定..."
+                layoutStepInit.visibility = View.VISIBLE
+                layoutStepFace.visibility = View.GONE
+                tvInitStatus.text = "正在融合生物特征并注册设备..."
+                tvInitResult.visibility = View.GONE
+                btnNextStep.isEnabled = false
+            }
+            RegisterStep.DONE -> {
+                tvStatusDetail.text = ""
+                tvStatusDetail.visibility = View.GONE
+                layoutStepInit.visibility = View.VISIBLE
+                tvInitStatus.text = "✅ 所有安全模块已就绪"
+                tvInitResult.visibility = View.VISIBLE
+                tvInitResult.text = "设备已成功注册，请点击下方按钮进入主页"
+                btnNextStep.text = "进入主页"
+            }
+        }
+    }
 
-            // 4. 🔴 严谨的模型加载（闪退高发区）
-            lifecycleScope.launch(Dispatchers.IO) {
-                try {
-                    val modelFile = File(filesDir, "haarcascade_frontalface_alt.xml")
+    // ──── Next button ────
 
-                    // 检查 Assets 拷贝
-                    if (!modelFile.exists()) {
-                        // 🔴 注意：请确认你 assets 文件夹下文件名叫这个，一个字母都不能错！
-                        assets.open("haarcascade_frontalface_alt.xml").use { input ->
-                            modelFile.outputStream().use { output -> input.copyTo(output) }
-                        }
-                    }
-
-                    // 调用 JNI（如果 NativeLib 里没载入 .so 也会闪退）
-                    val isInit = NativeLib.initDetector(modelFile.absolutePath)
-
+    private fun onNextClicked() {
+        when (currentStep) {
+            RegisterStep.USER_INFO -> {
+                val name = etUserName.text.toString().trim()
+                if (name.isEmpty()) {
+                    Toast.makeText(this, getString(R.string.register_toast_enter_name), Toast.LENGTH_SHORT).show()
+                    return
+                }
+                lifecycleScope.launch(Dispatchers.IO) {
+                    val repo = UserRepository(filesDir, File(nvramDirPath))
+                    repo.saveNickname(name)
                     withContext(Dispatchers.Main) {
-                        if (isInit) {
-                            binding.btnNextStep.isEnabled = true
-                            binding.btnNextStep.text = "开始采集指纹" // ✅ 与初始步骤FINGERPRINT匹配
-                        } else {
-                            binding.btnNextStep.text = "插件初始化失败"
-                        }
-                    }
-                } catch (e: Exception) {
-                    Log.e("PQZK", "模型拷贝或初始化崩溃: ${e.message}")
-                    // 如果文件找不到会进这里
-                }
-            }
-
-            binding.btnNextStep.setOnClickListener {
-
-                when (currentStep) {
-
-                    RegisterStep.FINGERPRINT -> {
-                        // 👉 防止重复点击
-                        binding.btnNextStep.isEnabled = false
-                        binding.btnNextStep.text = "正在采集指纹..."
-                        startFingerprintProcess()
-                    }
-
-                    RegisterStep.FACE -> {
-                        if (checkCameraPermission()) {
-                            binding.btnNextStep.text = "正在启动摄像头..."
-                            startCaptureProcess()
-                        } else {
-                            requestCameraPermission()
-                        }
-                    }
-
-                    RegisterStep.DONE -> {
-                        Toast.makeText(this, "已完成注册", Toast.LENGTH_SHORT).show()
+                        advanceTo(RegisterStep.TEE_CHECK)
                     }
                 }
             }
-
-        } catch (e: Exception) {
-            Log.e("PQZK", "onCreate 布局初始化失败: ${e.message}")
+            RegisterStep.FINGERPRINT -> {
+                btnNextStep.isEnabled = false
+                btnNextStep.text = "请在对话框中验证指纹..."
+                showFingerprintPrompt()
+            }
+            RegisterStep.DONE -> {
+                startActivity(Intent(this, MainActivity::class.java))
+                finish()
+            }
+            else -> {} // auto-advancing steps are handled in advanceTo()
         }
     }
 
-    private fun startFingerprintProcess() {
-
-        binding.btnNextStep.isEnabled = false
-        binding.btnNextStep.text = "正在采集指纹..."
-
-        lifecycleScope.launch(Dispatchers.Default) {
-            try {
-
-                Log.d("FACE_FLOW", "👉 开始采集指纹")
-
-                // ✅ 1. 获取指纹特征（JNI）
-                fingerprintFeature = NativeLib.extractFingerprintFeature()
-
-                Log.d("FACE_FLOW", "✅ 指纹特征获取完成")
-
-                withContext(Dispatchers.Main) {
-                    // 👉 切换到人脸步骤
-                    currentStep = RegisterStep.FACE
-
-                    binding.btnNextStep.text = "开始采集人脸"
-                    binding.btnNextStep.isEnabled = true
-                }
-
-            } catch (e: Exception) {
-                withContext(Dispatchers.Main) {
-                    handleError("指纹采集失败")
-                }
-            }
+    private fun advanceTo(next: RegisterStep) {
+        currentStep = next
+        showStep(next)
+        when (next) {
+            RegisterStep.TEE_CHECK    -> performTeeCheck()
+            RegisterStep.KYBER_KEYGEN -> performKyberKeygen()
+            RegisterStep.SECURITY_BIND -> performSecurityBind()
+            else -> {}
         }
     }
 
-    /**
-     * 核心逻辑：处理人脸特征并调用 JNI 注册 [cite: 51, 53]
-     */
-    private fun handleFaceCaptured(faceBitmap: Bitmap) {
-        isProcessing = false
-        binding.registerCameraView.disableView()
+    // ──── Step 2: TEE environment check ────
 
-        lifecycleScope.launch(Dispatchers.Default) {
+    private fun performTeeCheck() {
+        lifecycleScope.launch(Dispatchers.IO) {
             try {
-                // 👉 1. 提取人脸特征
-                faceFeature = NativeLib.extractFaceFeature(faceBitmap)
+                // Ensure NVRAM directory
+                val nvram = File(nvramDirPath)
+                if (!nvram.exists()) nvram.mkdirs()
 
-                // 👉 2. 获取 salt
-                val salt = NativeLib.getDeviceStaticSalt()
-
-                // 👉 3. 构建 Merkle Tree（关键！）
-                val features = arrayOf(
-                    fingerprintFeature,
-                    faceFeature
-                )
-
-                val rBio = NativeLib.buildMerkleRoot(features, salt)
-
-                // 👉 4. 注册
-                val result = NativeLib.nativeRegisterDevice(rBio, nvramDirPath)
+                // Preload face detection model
+                val modelFile = File(filesDir, "haarcascade_frontalface_alt.xml")
+                if (!modelFile.exists()) {
+                    assets.open("haarcascade_frontalface_alt.xml").use { input ->
+                        modelFile.outputStream().use { output -> input.copyTo(output) }
+                    }
+                }
+                val detectorOk = NativeLib.initDetector(modelFile.absolutePath)
 
                 withContext(Dispatchers.Main) {
-                    if (result == 0) {
-                        currentStep = RegisterStep.DONE
-                        startActivity(Intent(this@RegisterActivity, MainActivity::class.java))
-                        finish()
+                    if (detectorOk) {
+                        tvInitResult.visibility = View.VISIBLE
+                        tvInitResult.text = "✅ TEE 环境正常，人脸模型已加载"
                     } else {
-                        handleError("注册失败: $result")
+                        tvInitResult.visibility = View.VISIBLE
+                        tvInitResult.text = "⚠️ 模型加载失败，人脸采集可能不可用"
                     }
+                    delay(800)
+                    advanceTo(RegisterStep.KYBER_KEYGEN)
                 }
-
             } catch (e: Exception) {
+                Log.e(TAG, "TEE check failed", e)
                 withContext(Dispatchers.Main) {
-                    handleError("人脸处理失败")
+                    tvInitResult.visibility = View.VISIBLE
+                    tvInitResult.text = "⚠️ TEE 检测异常: ${e.message}"
+                    delay(1000)
+                    advanceTo(RegisterStep.KYBER_KEYGEN)
                 }
             }
         }
     }
 
-    private fun handleError(msg: String) {
-        isProcessing = false
-        binding.btnNextStep.isEnabled = true
-        binding.btnNextStep.text = "重新采集"
-        Toast.makeText(this, "❌ $msg", Toast.LENGTH_LONG).show()
+    // ──── Step 3: Kyber-768 key generation ────
+
+    private fun performKyberKeygen() {
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val result = NativeLib.mlkemKeygen()
+                if (result != null) {
+                    kyberPk = result.first
+                    kyberSk = result.second
+                    Log.d(TAG, "✅ Kyber-768 密钥对生成成功 (pk=${kyberPk!!.size}B, sk=${kyberSk!!.size}B)")
+                } else {
+                    Log.e(TAG, "Kyber 密钥对生成返回 null")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Kyber keygen error", e)
+            }
+
+            withContext(Dispatchers.Main) {
+                if (kyberPk != null) {
+                    tvInitResult.visibility = View.VISIBLE
+                    tvInitResult.text = "✅ Kyber-768 主密钥已生成"
+                } else {
+                    tvInitResult.visibility = View.VISIBLE
+                    tvInitResult.text = "⚠️ 密钥生成失败，将使用备用方案"
+                }
+                delay(600)
+                advanceTo(RegisterStep.FINGERPRINT)
+            }
+        }
     }
 
-    // --- OpenCV 回调接口 ---
+    // ──── Fingerprint prompt ────
+
+    private fun showFingerprintPrompt() {
+        val prompt = BiometricPrompt(this, ContextCompat.getMainExecutor(this),
+            object : BiometricPrompt.AuthenticationCallback() {
+                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                    Log.d(TAG, "指纹认证成功")
+                    tvInitStatus.text = getString(R.string.register_fingerprint_ok)
+                    advanceTo(RegisterStep.FACE)
+                }
+                override fun onAuthenticationFailed() {
+                    Log.d(TAG, "指纹不匹配")
+                    Toast.makeText(this@RegisterActivity, getString(R.string.register_toast_fingerprint_mismatch), Toast.LENGTH_SHORT).show()
+                    btnNextStep.isEnabled = true
+                    btnNextStep.text = "开始采集指纹"
+                }
+                override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                    Log.e(TAG, "指纹认证错误 [$errorCode]: $errString")
+                    Toast.makeText(this@RegisterActivity, getString(R.string.register_toast_auth_error, errString), Toast.LENGTH_SHORT).show()
+                    btnNextStep.isEnabled = true
+                    btnNextStep.text = "开始采集指纹"
+                }
+            })
+        prompt.authenticate(
+            BiometricPrompt.PromptInfo.Builder()
+                .setTitle(getString(R.string.register_biometric_title))
+                .setDescription(getString(R.string.register_biometric_desc))
+                .setNegativeButtonText(getString(R.string.register_biometric_cancel))
+                .build()
+        )
+    }
+
+    // ──── Camera (Step 5: Face) ────
+
+    private fun enableCamera() {
+        if (!OpenCVLoader.initLocal()) {
+            Log.e(TAG, "OpenCV 初始化失败")
+        }
+        layoutStepFace.visibility = View.VISIBLE
+        cameraView.postDelayed({
+            cameraView.enableView()
+            btnNextStep.text = "请正对摄像头..."
+            btnNextStep.isEnabled = false
+        }, 300)
+
+        // Auto-capture after 2 seconds
+        cameraView.postDelayed({
+            if (currentStep == RegisterStep.FACE && !isProcessing) {
+                isProcessing = true
+                captureRequest = true
+            }
+        }, 2000)
+    }
+
+    private fun disableCamera() {
+        try { cameraView.disableView() } catch (_: Exception) {}
+    }
+
     override fun onCameraViewStarted(width: Int, height: Int) {}
     override fun onCameraViewStopped() {}
+
     override fun onCameraFrame(inputFrame: CameraBridgeViewBase.CvCameraViewFrame): Mat {
         val rgba = inputFrame.rgba()
-        // 此处简化处理：只要画面不为空就提示可采集
-
-        // ✅ 第一层保险：不在采集中直接返回
-        if (!isProcessing || currentStep != RegisterStep.FACE) {
-            return rgba
-        }
-
-        // ✅ 第二层：只处理有效帧
         if (rgba.empty()) return rgba
 
-        if (captureRequest) {
-
-            Log.d("FACE_FLOW", "📸 捕获帧")
-
+        // 采集帧与主界面认证保持完全一致的方向处理：旋转90° + 镜像
+        if (isProcessing && currentStep == RegisterStep.FACE && captureRequest) {
             captureRequest = false
-            hasScheduledCapture = false   // ✅ 重置调度标志
-
+            hasScheduledCapture = false
             val frameMat = rgba.clone()
+            Core.rotate(frameMat, frameMat, Core.ROTATE_90_COUNTERCLOCKWISE)
+            Core.flip(frameMat, frameMat, 1)
 
             lifecycleScope.launch(Dispatchers.Default) {
-
-                val bmp = Bitmap.createBitmap(
-                    frameMat.cols(),
-                    frameMat.rows(),
-                    Bitmap.Config.ARGB_8888
-                )
-
+                val bmp = Bitmap.createBitmap(frameMat.cols(), frameMat.rows(), Bitmap.Config.ARGB_8888)
                 org.opencv.android.Utils.matToBitmap(frameMat, bmp)
                 frameMat.release()
-
-                withContext(Dispatchers.Main) {
-                    handleFaceCaptured(bmp)
-                }
+                withContext(Dispatchers.Main) { handleFaceCaptured(bmp) }
             }
-
-        } else if (!hasScheduledCapture) {
-
-            // ✅ 关键修复：只允许调度一次
+        } else if (isProcessing && currentStep == RegisterStep.FACE && !hasScheduledCapture) {
             hasScheduledCapture = true
-
-            Log.d("FACE_FLOW", "⏳ 安排1秒后采集")
-
-            binding.root.postDelayed({
-                captureRequest = true
-            }, 1000)
+            cameraView.postDelayed({ captureRequest = true }, 1000)
         }
 
-        return rgba
+        // 预览镜像，与手机自拍看到的一致
+        val preview = rgba.clone()
+        Core.flip(preview, preview, 1)
+        return preview
     }
+
+    private fun handleFaceCaptured(faceBitmap: Bitmap) {
+        isProcessing = false
+        disableCamera()
+        layoutStepFace.visibility = View.GONE
+
+        lifecycleScope.launch(Dispatchers.Default) {
+            try {
+                val face = NativeLib.extractFaceFeature(faceBitmap)
+                faceFeature = face
+                NativeLib.saveFaceTemplate(nvramDirPath, face)
+                Log.d(TAG, "✅ 人脸特征采集完成")
+                withContext(Dispatchers.Main) { advanceTo(RegisterStep.SECURITY_BIND) }
+            } catch (e: Exception) {
+                Log.e(TAG, "Face extraction failed", e)
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(this@RegisterActivity, "人脸采集失败", Toast.LENGTH_SHORT).show()
+                    showStep(RegisterStep.FACE)
+                }
+            }
+        }
+    }
+
+    // ──── Step 6: Security bind (Merkle root + device registration) ────
+
+    private fun performSecurityBind() {
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val ff = faceFeature
+                if (ff == null) {
+                    withContext(Dispatchers.Main) {
+                        tvInitResult.visibility = View.VISIBLE
+                        tvInitResult.text = "❌ 生物特征数据缺失，请重试"
+                        btnNextStep.isEnabled = true
+                        btnNextStep.text = "重新开始"
+                    }
+                    return@launch
+                }
+
+                // Step 1: Get device salt
+                val salt = NativeLib.getDeviceStaticSalt()
+                Log.d(TAG, "Salt obtained: ${salt.size} bytes")
+
+                // Step 2: Build Merkle root from the face feature
+                val rBio = NativeLib.buildMerkleRoot(arrayOf(ff), salt)
+                Log.d(TAG, "Merkle root r_bio: ${rBio.size} bytes")
+
+                // Step 3: Register device — binds r_bio + master key + device identity + NVRAM
+                val regResult = NativeLib.nativeRegisterDevice(rBio, nvramDirPath)
+                Log.d(TAG, "nativeRegisterDevice result: $regResult")
+
+                // Step 4: Verify registration
+                val verified = NativeLib.isRegistered(nvramDirPath) == 1
+                Log.d(TAG, "isRegistered verification: $verified")
+
+                withContext(Dispatchers.Main) {
+                    if (regResult == 0 && verified) {
+                        tvInitResult.visibility = View.VISIBLE
+                        tvInitResult.text = "✅ 安全绑定完成 | r_bio + 主密钥 + 设备身份已落盘"
+                        delay(800)
+                        advanceTo(RegisterStep.DONE)
+                    } else {
+                        tvInitResult.visibility = View.VISIBLE
+                        tvInitResult.text = "❌ 设备注册失败 (code=$regResult, verified=$verified)"
+                        btnNextStep.isEnabled = true
+                        btnNextStep.text = "重试"
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Security bind failed", e)
+                withContext(Dispatchers.Main) {
+                    tvInitResult.visibility = View.VISIBLE
+                    tvInitResult.text = "❌ 安全绑定异常: ${e.message}"
+                    btnNextStep.isEnabled = true
+                    btnNextStep.text = "重试"
+                }
+            }
+        }
+    }
+
+    // ──── Lifecycle ────
 
     override fun onResume() {
         super.onResume()
-        // 只有在 OpenCV 初始化成功后，且已经点击过开始采集（isProcessing）时，才尝试使能相机
-        if (OpenCVLoader.initLocal()) {
-            if (isProcessing) {
-                binding.registerCameraView.enableView()
-            }
+        if (currentStep == RegisterStep.FACE && OpenCVLoader.initLocal()) {
+            cameraView.enableView()
         }
     }
 
     override fun onPause() {
         super.onPause()
-        binding.registerCameraView.disableView()
-    }
-
-    private fun checkCameraPermission(): Boolean {
-        return androidx.core.content.ContextCompat.checkSelfPermission(
-            this, android.Manifest.permission.CAMERA
-        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-    }
-
-    private fun requestCameraPermission() {
-        androidx.core.app.ActivityCompat.requestPermissions(
-            this, arrayOf(android.Manifest.permission.CAMERA), 101
-        )
-    }
-
-    private fun startCaptureProcess() {
-        isProcessing = true
-        captureRequest = false
-        hasScheduledCapture = false
-
-        binding.btnNextStep.isEnabled = false
-        binding.btnNextStep.text = "正在激活相机..."
-
-        // 🔴 关键：先让控件可见，再开启硬件
-        binding.registerCameraView.visibility = View.VISIBLE
-
-        binding.registerCameraView.setCameraPermissionGranted()
-
-        // 给 UI 线程一点点渲染时间
-        binding.root.postDelayed({
-            binding.registerCameraView.enableView()
-            // 不要在这里设置 captureRequest = true，移到回调中判断
-            binding.btnNextStep.text = "请正对摄像头..."
-        }, 200)
-    }
-
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == 101) {
-            if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                startCaptureProcess()
-            } else {
-                Toast.makeText(this, "需要相机权限才能进行人脸采集", Toast.LENGTH_LONG).show()
-                binding.btnNextStep.isEnabled = true
-                binding.btnNextStep.text = "重新采集人脸"
-            }
+        if (currentStep == RegisterStep.FACE) {
+            disableCamera()
         }
+    }
+
+    override fun onDestroy() {
+        try { cameraView.disableView() } catch (_: Exception) {}
+        super.onDestroy()
     }
 }

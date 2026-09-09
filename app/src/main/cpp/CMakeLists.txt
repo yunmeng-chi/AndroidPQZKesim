@@ -5,19 +5,40 @@ project("pqzkesim_jni" LANGUAGES C CXX)
 # 1. 编译器设置与安全选项
 # ============================================================
 set(CMAKE_C_STANDARD 11)
-set(CMAKE_CXX_STANDARD 17) # OpenCV 通常需要 C++ 11 以上
+set(CMAKE_CXX_STANDARD 17) # OpenCV 需要 C++14 以上
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+# 全局优化：密码学运算必须开启 -O2 以上以控制认证延时
 add_compile_options(
     -Wall -Wextra -Wno-unused-parameter
     -fstack-protector-strong
     -D_FORTIFY_SOURCE=2
+    -O2
+    -fomit-frame-pointer
+    -fstrict-aliasing
+    -funroll-loops
 )
 
+# Debug 模式下保留符号表但保持优化
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    add_compile_options(-g -fno-omit-frame-pointer)
+endif()
+
+# Release 模式添加链接时优化
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
-    add_compile_options(-O2)
-else()
-    add_compile_options(-O0 -g)
+    add_compile_options(-DNDEBUG -flto)
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -flto")
+endif()
+
+# Phase 0-6 聚合桥接层计时控制宏
+add_compile_options(
+    -DPQZK_JNI_AGGREGATION     # 启用聚合 JNI 桥接
+    -DPQZK_TIMING_CONTROL      # 启用认证延时控制
+)
+
+# ARM NEON 向量化优化（aarch64 平台自动启用）
+if(ANDROID_ABI STREQUAL "arm64-v8a")
+    add_compile_options(-march=armv8-a+crypto -mtune=generic)
 endif()
 
 # ============================================================
@@ -57,14 +78,16 @@ include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/../../../../opencv/native/jni/include
 )
 
-# 汇总所有源文件
+# 汇总所有源文件（Phase 0-6 聚合 JNI 桥接层）
 set(PQZK_SOURCES
-    ${CMAKE_CURRENT_SOURCE_DIR}/native-lib.cpp         # 将 JNI 接口直接合入主库
-    ${CMAKE_CURRENT_SOURCE_DIR}/pq_zk_esim.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/crypto/pq-zk-crypto.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/algebra/pq_zk_poly.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/platform/pq_zk_nvram.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/tee/pqzk_merkle.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/native-lib.cpp         # JNI 聚合桥接层（Phase 0-6）
+    ${CMAKE_CURRENT_SOURCE_DIR}/pq_zk_esim.c           # 协议核心实现
+    ${CMAKE_CURRENT_SOURCE_DIR}/crypto/pq-zk-crypto.c  # 密码学原语（SHA3/AES/HMAC/KDF）
+    ${CMAKE_CURRENT_SOURCE_DIR}/algebra/pq_zk_poly.c   # 多项式代数运算
+    ${CMAKE_CURRENT_SOURCE_DIR}/platform/pq_zk_nvram.c # NVRAM 安全持久化存储
+    ${CMAKE_CURRENT_SOURCE_DIR}/tee/pqzk_merkle.c      # 生物特征 Merkle 树
+    ${CMAKE_CURRENT_SOURCE_DIR}/pqzk_mlkem.c           # ML-KEM APDU 隧道
+    ${CMAKE_CURRENT_SOURCE_DIR}/pqzk_cert.c            # GSMA 证书链模拟
 )
 
 # ============================================================
@@ -88,3 +111,17 @@ target_link_libraries(pqzkesim
     m
     atomic
 )
+
+# ============================================================
+# 构建摘要
+# ============================================================
+message(STATUS "----------------------------------------")
+message(STATUS "  项目    : PQ-ZK-eSIM JNI (Phase 0-6 聚合桥接)")
+message(STATUS "  平台    : Android ${ANDROID_ABI}")
+message(STATUS "  类型    : ${CMAKE_BUILD_TYPE}")
+message(STATUS "  C 标准  : C${CMAKE_C_STANDARD}")
+message(STATUS "  C++标准 : C++${CMAKE_CXX_STANDARD}")
+message(STATUS "  优化    : O2 (密码运算延时控制)")
+message(STATUS "----------------------------------------")
+message(STATUS "  源文件  : ${PQZK_SOURCES}")
+message(STATUS "----------------------------------------")

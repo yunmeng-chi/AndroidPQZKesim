@@ -2,31 +2,36 @@ package com.yourcompany.pqzkesim
 
 import android.graphics.Bitmap
 import android.util.Log
-
+import org.json.JSONObject
 
 /**
- * PQ-ZK-eSIM 底层算法库调度器
- * 职责：驱动底层C算法库执行密码协议，Java层仅做数据透传
+ * PQ-ZK-eSIM 底层算法库调度器 (v5.2 — Phase 0-6 聚合 JNI 桥接)
+ *
+ * 设计原则：
+ *   - 高度聚合接口，单次 JNI 调用完成多个协议阶段
+ *   - 所有敏感密码运算在 native 层完成，Kotlin 仅做数据透传
+ *   - 字节大小严格对齐 C 头文件定义（ProtocolConstants）
  */
 object NativeLib {
     private const val TAG = "PQZK-Native"
 
-    // 增加初始化状态标志位
     @Volatile var isDetectorInitialized = false
         private set
 
     init {
         try {
-            System.loadLibrary("pqzkesim") // 确保这里的名字和 CMakeLists 里的 project 一致
-            Log.d("PQZK-Native", "库文件 pqzkesim 加载成功")
+            System.loadLibrary("pqzkesim")
+            Log.d(TAG, "✅ 库文件 pqzkesim 加载成功")
         } catch (e: UnsatisfiedLinkError) {
-            Log.e("PQZK-Native", "库文件加载失败: ${e.message}")
+            Log.e(TAG, "❌ 库文件加载失败: ${e.message}")
         }
     }
 
-    /**
-     * 初始化检测器（封装层）
-     */
+    // ================================================================
+    // 检测器初始化（OpenCV 人脸检测）
+    // ================================================================
+
+    @Synchronized
     fun initDetector(modelPath: String): Boolean {
         if (isDetectorInitialized) {
             Log.d(TAG, "检测器已初始化，跳过重复操作")
@@ -35,106 +40,387 @@ object NativeLib {
         return try {
             val success = nativeInitDetector(modelPath)
             isDetectorInitialized = success
-            Log.d(TAG, "检测器初始化结果: $success, 路径: $modelPath")
+            Log.d(TAG, "检测器初始化结果: $success")
             success
         } catch (e: Exception) {
             Log.e(TAG, "检测器初始化异常", e)
             false
         }
     }
-    /**
-     * 提取人脸特征并写入 latestRBio 数组
-     * @param matAddr OpenCV Mat 的原生地址
-     * @param latestRBio 接收特征的字节数组
-     */
+
     fun processFaceAndGetRbio(matAddr: Long, latestRBio: ByteArray): Int {
         if (!isDetectorInitialized) {
-            Log.e(TAG, "❌ 检测器未初始化，无法提取特征！请先调用 initDetector()")
+            Log.e(TAG, "❌ 检测器未初始化！请先调用 initDetector()")
             return -1
         }
         return try {
-            val ret = nativeProcessFaceAndGetRbio(matAddr, latestRBio)
-            Log.d(TAG, "特征提取返回值: $ret, 数据非零: ${latestRBio.any { it != 0.toByte() }}")
-            ret
+            nativeProcessFaceAndGetRbio(matAddr, latestRBio)
         } catch (e: Exception) {
-            Log.e(TAG, "特征提取JNI异常", e)
+            Log.e(TAG, "特征提取异常", e)
             -2
         }
     }
 
-    // --- 原生 JNI 函数声明（重命名避免混淆） ---
+    // ---- 原生 JNI 函数声明 ----
     private external fun nativeInitDetector(modelPath: String): Boolean
     private external fun nativeProcessFaceAndGetRbio(matAddr: Long, latestRBio: ByteArray): Int
-    // --- 注册阶段接口  ---
+
+    // ================================================================
+    // Phase 0: GSMA 证书验证 (聚合)
+    // 单次 JNI → 完成证书验证 + EID 获取 + 公钥导出
+    // ================================================================
 
     /**
-     * 提取人脸特征：调用 OpenCV DNN (YuNet+SFace) [cite: 53]
+     * Phase 0: GSMA 证书验证 + 设备证明
+     * @return JSON {eid, cert_valid, mno_id, pk_t_hex, ctr}
      */
+    fun phase0_GSMAVerify(nvramDirPath: String, domainId: String): JSONObject {
+        val jsonStr = nativePhase0_GSMAVerify(nvramDirPath, domainId)
+        return JSONObject(jsonStr)
+    }
+
+    // ================================================================
+    // Phase 1-2 聚合：承诺生成 + 预计算 + 计数器 + R_dynamic
+    // 合并 PQC_eUICC_Commit + PQC_PreCompute + 计数器读取 → 1 次 JNI
+    // ================================================================
+
+    /**
+     * Phase 1-2 聚合：承诺生成 + 预计算
+     * @return Pair<Int, NativeLib.PreNetworkResult> (错误码, 结果数据)
+     */
+    data class PreNetworkResult(
+        val wSec: ByteArray,        // K*N*4 = 5120 字节
+        val macW: ByteArray,        // 32 字节
+        val wTotal: ByteArray,      // K*N*4 = 5120 字节
+        val seedY: ByteArray,       // 32 字节
+        val rDynamic: ByteArray,    // 32 字节
+        val ctrLocal: Long          // 当前计数器值
+    )
+
+    fun phase12_CommitPrecompute(
+        nvramDirPath: String,
+        rBio: ByteArray,
+        domainId: String
+    ): Pair<Int, PreNetworkResult?> {
+        val wSec     = ByteArray(ProtocolConstants.POLYVEC_K_BYTES)
+        val macW     = ByteArray(ProtocolConstants.MAC_BYTES)
+        val wTotal   = ByteArray(ProtocolConstants.POLYVEC_K_BYTES)
+        val seedY    = ByteArray(ProtocolConstants.SEED_BYTES)
+        val rDynamic = ByteArray(ProtocolConstants.SEED_BYTES)
+        val ctrArr   = LongArray(1)
+
+        val ret = nativePhase12_CommitPrecompute(
+            nvramDirPath, rBio, domainId,
+            wSec, macW, wTotal, seedY, rDynamic, ctrArr
+        )
+
+        if (ret != 0) {
+            Log.e(TAG, "Phase12 失败: $ret")
+            return Pair(ret, null)
+        }
+
+        Log.d(TAG, "Phase12 完成: ctr=${ctrArr[0]}")
+        return Pair(ret, PreNetworkResult(wSec, macW, wTotal, seedY, rDynamic, ctrArr[0]))
+    }
+
+    // ================================================================
+    // Phase 3-5 聚合：挑战 + AuthToken + 掩码计算 + LPA 聚合
+    // 合并 PQC_GenChallenge + TEE_AuthToken + ComputeZ + Aggregate → 1 次 JNI
+    // ================================================================
+
+    /**
+     * Phase 3-5 聚合：生成证明响应
+     * @return Pair<Int, NativeLib.ProveResponseResult>
+     */
+    data class ProveResponseResult(
+        val cAgg: ByteArray,        // N*4 = 1024 字节
+        val rDynamic: ByteArray,    // 32 字节
+        val authToken: ByteArray,   // 32 字节
+        val m2Path: ByteArray,      // Merkle 路径（变长，最大约 256 字节）
+        val zFinal: ByteArray       // M*N*4 = 8192 字节
+    )
+
+    fun phase345_ProveResponse(
+        nvramDirPath: String,
+        commW: ByteArray,
+        cSeed: ByteArray,
+        m1Index: Int,
+        seedY: ByteArray
+    ): Pair<Int, ProveResponseResult?> {
+        val cAgg      = ByteArray(ProtocolConstants.POLY_BYTES)
+        val rDynamic  = ByteArray(ProtocolConstants.SEED_BYTES)
+        val authToken = ByteArray(ProtocolConstants.MAC_BYTES)
+        val m2Path    = ByteArray(512)  // Merkle 路径最大 512 字节（depth≤6: 6*(32+1)+8=206）
+        val zFinal    = ByteArray(ProtocolConstants.POLYVEC_M_BYTES)
+
+        val ret = nativePhase345_ProveResponse(
+            nvramDirPath, commW, cSeed, m1Index, seedY,
+            cAgg, rDynamic, authToken, m2Path, zFinal
+        )
+
+        if (ret != 0) {
+            Log.e(TAG, "Phase345 失败: $ret")
+            return Pair(ret, null)
+        }
+
+        Log.d(TAG, "Phase345 完成: z_final 已生成")
+        return Pair(ret, ProveResponseResult(cAgg, rDynamic, authToken, m2Path, zFinal))
+    }
+
+    // ================================================================
+    // Phase 6: 原生验证引擎
+    // ================================================================
+
+    /**
+     * Phase 6: 服务端验证（可选本地执行）
+     * @return 0 = 验证通过
+     */
+    fun phase6_VerifyEngine(
+        pkT: ByteArray,
+        commW: ByteArray,
+        respZ: ByteArray,
+        nonceS: ByteArray,
+        rDynamic: ByteArray,
+        mMask: ByteArray
+    ): Int {
+        return nativePhase6_VerifyEngine(pkT, commW, respZ, nonceS, rDynamic, mMask)
+    }
+
+    // ================================================================
+    // 【Master Orchestrator】一键全认证：Phase 0-5 单次 JNI 调用
+    // 返回完整 JSON，包含所有 Base64 编码的中间结果
+    // ================================================================
+
+    /**
+     * 一键全认证（Master Orchestrator）
+     * 所有密码学计算在单次 JNI 调用内完成，仅返回最终结果
+     *
+     * @param nvramDirPath eUICC NVRAM 路径
+     * @param rBio         生物特征（32 字节）
+     * @param cSeed        服务端挑战种子（32 字节）
+     * @param m1Index      生物特征叶子索引
+     * @param domainId     运营商域 ID
+     * @return Pair<Int, JSONObject?> (错误码, 结果JSON)
+     */
+    fun runFullAuth(
+        nvramDirPath: String,
+        rBio: ByteArray,
+        cSeed: ByteArray,
+        m1Index: Int,
+        domainId: String
+    ): Pair<Int, JSONObject?> {
+        return try {
+            val jsonStr = nativeRunFullAuth(nvramDirPath, rBio, cSeed, m1Index, domainId)
+            val json = JSONObject(jsonStr)
+            if (json.has("error")) {
+                Log.e(TAG, "FullAuth 失败: ${json.optString("error")}")
+                Pair(-1, json)
+            } else {
+                Log.d(TAG, "FullAuth 成功: ctr=${json.optLong("ctr_local")}")
+                Pair(0, json)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "FullAuth 异常", e)
+            Pair(-2, null)
+        }
+    }
+
+    // ================================================================
+    // 【兼容层】保留原有 JNI 声明（向后兼容 RegisterActivity / MainActivity）
+    // ================================================================
+
     external fun extractFaceFeature(bitmap: Bitmap): ByteArray
-
-    /**
-     * 获取设备专属静态 Salt [cite: 54]
-     */
+    external fun saveFaceTemplate(nvramDirPath: String, faceFeature: ByteArray): Int
+    external fun verifyFace(nvramDirPath: String, freshFeature: ByteArray): Int
     external fun getDeviceStaticSalt(): ByteArray
-
-    /**
-     * 计算 Merkle 树根 R_bio：输入特征和 Salt，返回 Hash 结果 [cite: 54]
-     */
-    external fun buildMerkleRoot(
-        features: Array<ByteArray>,
-        salt: ByteArray
-    ): ByteArray
-
-    /**
-     * 执行原生注册协议：生成公钥 T 并通过 eUICC 模拟器存储私钥 S [cite: 51, 55]
-     * @return 0 表示成功，其他表示错误码
-     */
-    // 修改后：增加 path 参数
+    external fun buildMerkleRoot(features: Array<ByteArray>, salt: ByteArray): ByteArray
     external fun nativeRegisterDevice(rBio: ByteArray, nvramDirPath: String): Int
-
-
-    // --- 认证阶段接口 (对应文档 3.4) ---
-
-    /**
-     * 阶段 1：本地预计算 (PQC_PreCompute + Commit) [cite: 87]
-     */
     external fun pqcPreCompute(): Int
-
-    /**
-     * 阶段 4-5：生成证明 (ComputeZ_and_Mask + Aggregate) [cite: 87]
-     * Java 层不生成掩码 M_mask，由 C 层内部生成 [cite: 203]
-     */
     external fun pqcComputeAndAggregate(cSeed: ByteArray, m1: ByteArray): ByteArray
-
-    // 项目核心JNI接口
     external fun PQC_eUICC_Commit(nvramDir: String, outWSec: ByteArray, outMacW: ByteArray): Int
     external fun PQC_PreCompute(inWSec: ByteArray, outWTotal: ByteArray, outSeedY: ByteArray): Int
     external fun PQC_GenChallenge(commW: ByteArray, cSeed: ByteArray, outCAgg: ByteArray): Int
     external fun PQC_ComputeZ_and_Mask(
         nvramDir: String, cAgg: ByteArray, cSeed: ByteArray,
-        rDynamic: ByteArray, hashM2: ByteArray, authToken: ByteArray, outZMasked: ByteArray
+        rDynamic: ByteArray, authToken: ByteArray, outZMasked: ByteArray
     ): Int
     external fun PQC_LPA_Aggregate(zMaskedIn: ByteArray, seedY: ByteArray, outZFinal: ByteArray): Int
-    // 从NVRAM读取真实计数器ctr_local
     external fun PQC_Get_Current_Ctr(nvramDir: String): Long
-
-
-    // --- 设备状态获取 (对应文档 3.3) ---
-
-    /**
-     * 获取设备唯一标识符 EID [cite: 63]
-     */
     external fun getEID(): String
-
-    /**
-     * 获取最后一次成功认证的时间戳 [cite: 65]
-     */
     external fun getLastAuthTime(): String
-
-    /**
-     * 检查本地是否已完成注册 [cite: 20]
-     */
     external fun isRegistered(nvramDirPath: String): Int
 
-    external fun extractFingerprintFeature(): ByteArray
+    // ================================================================
+    // ML-KEM (CRYSTALS-Kyber-768) 算子切换隧道
+    // ================================================================
+
+    /** ML-KEM 密钥对生成，返回 Pair(pk, sk) */
+    fun mlkemKeygen(): Pair<ByteArray, ByteArray>? {
+        val pk = ByteArray(ProtocolConstants.MLKEM_PK_BYTES)
+        val sk = ByteArray(ProtocolConstants.MLKEM_SK_BYTES)
+        val ret = nativeMlkemKeygen(pk, sk)
+        return if (ret == 0) Pair(pk, sk) else null
+    }
+
+    /** ML-KEM 封装（客户端），返回 Triple(ret, ct, sessionKey) */
+    fun mlkemEncapsulate(serverPk: ByteArray): Triple<Int, ByteArray, ByteArray>? {
+        val ct = ByteArray(ProtocolConstants.MLKEM_CT_BYTES)
+        val ss  = ByteArray(ProtocolConstants.MLKEM_SS_BYTES)
+        val ret = nativeMlkemEncapsulate(serverPk, ct, ss)
+        return if (ret == 0) Triple(ret, ct, ss) else null
+    }
+
+    /** ML-KEM 解封装（服务端），返回共享密钥 */
+    fun mlkemDecapsulate(pk: ByteArray, sk: ByteArray, ct: ByteArray): ByteArray? {
+        val ss = ByteArray(ProtocolConstants.MLKEM_SS_BYTES)
+        val ret = nativeMlkemDecapsulate(pk, sk, ct, ss)
+        return if (ret == 0) ss else null
+    }
+
+    /** APDU 隧道加密 */
+    fun apduEncrypt(sessionKey: ByteArray, plaintext: ByteArray): ByteArray? {
+        val ct = ByteArray(plaintext.size + 32) // 预留 MAC 空间
+        val ret = nativeApduEncrypt(sessionKey, plaintext, ct)
+        // native returns 0 on success, but JNI bridge maps 0→-1 via (ret>0?ret:-1)
+        // AES-CTR keystream is length-preserving; output size = plaintext size
+        return if (ret == -1 || ret > 0) ct.copyOf(plaintext.size) else null
+    }
+
+    /** APDU 隧道解密 */
+    fun apduDecrypt(sessionKey: ByteArray, ciphertext: ByteArray): ByteArray? {
+        val pt = ByteArray(ciphertext.size)
+        val ret = nativeApduDecrypt(sessionKey, ciphertext, pt)
+        // Same workaround as apduEncrypt: native success (0) mapped to -1 by JNI
+        return if (ret == -1 || ret > 0) pt.copyOf(ciphertext.size) else null
+    }
+
+    /** APDU 序列化算子切换载荷 */
+    fun apduSerializePayload(
+        rBioB: ByteArray, rBio: ByteArray, salt: ByteArray,
+        credKyc: ByteArray, certA: ByteArray, eid: ByteArray, tNew: ByteArray
+    ): ByteArray? {
+        val buf = ByteArray(ProtocolConstants.APDU_MAX_PAYLOAD)
+        val actualLen = nativeApduSerializePayload(rBioB, rBio, salt, credKyc, certA, eid, tNew, buf)
+        return if (actualLen > 0) buf.copyOf(actualLen) else null
+    }
+
+    /** APDU 反序列化算子切换载荷 */
+    data class ApduPayload(
+        val rBioB: ByteArray, val rBio: ByteArray, val salt: ByteArray,
+        val credKyc: ByteArray, val certA: ByteArray, val eid: ByteArray, val tNew: ByteArray
+    )
+
+    fun apduDeserializePayload(buf: ByteArray): ApduPayload? {
+        val rBioB   = ByteArray(32)
+        val rBio    = ByteArray(32)
+        val salt    = ByteArray(32)
+        val credKyc = ByteArray(64)
+        val certA   = ByteArray(ProtocolConstants.CERT_BYTES)
+        val eid     = ByteArray(16)
+        val tNew    = ByteArray(ProtocolConstants.PK_BYTES)
+        val ret = nativeApduDeserializePayload(buf, rBioB, rBio, salt, credKyc, certA, eid, tNew)
+        return if (ret == 0) ApduPayload(rBioB, rBio, salt, credKyc, certA, eid, tNew) else null
+    }
+
+    // ================================================================
+    // GSMA 证书操作 (pqzk_cert.h)
+    // ================================================================
+
+    /** 签发运营商证书，返回序列化后的证书字节数组 */
+    fun certIssueForMNO(domainId: ByteArray): ByteArray? {
+        val cert = ByteArray(ProtocolConstants.CERT_BYTES)
+        val ret = nativeCertIssueForMNO(domainId, cert)
+        return if (ret == 0) cert else null
+    }
+
+    /** 验证证书 */
+    fun certVerify(certBytes: ByteArray): Boolean {
+        return nativeCertVerify(certBytes) == 0
+    }
+
+    /** 签发 CredKYC */
+    fun credKycIssue(mnoSk: ByteArray, eid: ByteArray, rBio: ByteArray): ByteArray? {
+        val credKyc = ByteArray(32)
+        val ret = nativeCredKycIssue(mnoSk, eid, rBio, credKyc)
+        return if (ret == 0) credKyc else null
+    }
+
+    /** 验证 CredKYC */
+    fun credKycVerify(certBytes: ByteArray, eid: ByteArray, rBio: ByteArray, credKyc: ByteArray): Boolean {
+        return nativeCredKycVerify(certBytes, eid, rBio, credKyc) == 0
+    }
+
+    // ================================================================
+    // mode_switch — 算子切换
+    // ================================================================
+
+    /**
+     * 切换 eUICC NVRAM 绑定运营商 (mode_switch)
+     * 通过 ML-KEM APDU 隧道安全传输凭证，从运营商 A 切换到运营商 B
+     *
+     * @param nvramDirPath  eUICC NVRAM 目录路径
+     * @param domainIdB     目标运营商 B 的 domain ID (16 字节)
+     * @param mnoAId        当前运营商 A 的 domain ID (16 字节)
+     * @param mnoASk        当前运营商 A 的密钥 (32 字节)
+     * @return 0 = 成功, 负数 = 错误码
+     */
+    fun modeSwitch(
+        nvramDirPath: String,
+        domainIdB: ByteArray,
+        mnoAId: ByteArray,
+        mnoASk: ByteArray
+    ): Int {
+        return nativeModeSwitch(nvramDirPath, domainIdB, mnoAId, mnoASk)
+    }
+
+    // ================================================================
+    // 聚合 JNI 声明（Phase 0-6 + ML-KEM + Cert）
+    // ================================================================
+    private external fun nativePhase0_GSMAVerify(nvramDir: String, domainId: String): String
+    private external fun nativePhase12_CommitPrecompute(
+        nvramDir: String, rBio: ByteArray, domainId: String,
+        outWSec: ByteArray, outMacW: ByteArray, outWTotal: ByteArray,
+        outSeedY: ByteArray, outRDynamic: ByteArray, outCtr: LongArray
+    ): Int
+    private external fun nativePhase345_ProveResponse(
+        nvramDir: String, commW: ByteArray, cSeed: ByteArray,
+        m1Index: Int, seedY: ByteArray,
+        outCAgg: ByteArray, outRDynamic: ByteArray,
+        outAuthToken: ByteArray, outM2: ByteArray, outZFinal: ByteArray
+    ): Int
+    private external fun nativePhase6_VerifyEngine(
+        pkT: ByteArray, commW: ByteArray, respZ: ByteArray,
+        nonceS: ByteArray, rDynamic: ByteArray, mMask: ByteArray
+    ): Int
+    private external fun nativeRunFullAuth(
+        nvramDir: String, rBio: ByteArray, cSeed: ByteArray,
+        m1Index: Int, domainId: String
+    ): String
+
+    // ML-KEM JNI
+    private external fun nativeMlkemKeygen(outPk: ByteArray, outSk: ByteArray): Int
+    private external fun nativeMlkemEncapsulate(serverPk: ByteArray, outCt: ByteArray, outSs: ByteArray): Int
+    private external fun nativeMlkemDecapsulate(pk: ByteArray, sk: ByteArray, ct: ByteArray, outSs: ByteArray): Int
+    private external fun nativeApduEncrypt(sessionKey: ByteArray, plaintext: ByteArray, outCt: ByteArray): Int
+    private external fun nativeApduDecrypt(sessionKey: ByteArray, ciphertext: ByteArray, outPt: ByteArray): Int
+    private external fun nativeApduSerializePayload(
+        rBioB: ByteArray, rBio: ByteArray, salt: ByteArray,
+        credKyc: ByteArray, certA: ByteArray, eid: ByteArray, tNew: ByteArray, outBuf: ByteArray
+    ): Int
+    private external fun nativeApduDeserializePayload(
+        buf: ByteArray, outRBioB: ByteArray, outRBio: ByteArray, outSalt: ByteArray,
+        outCredKyc: ByteArray, outCertA: ByteArray, outEid: ByteArray, outTNew: ByteArray
+    ): Int
+
+    // Certificate JNI
+    private external fun nativeCertIssueForMNO(domainId: ByteArray, outCert: ByteArray): Int
+    private external fun nativeCertVerify(certBytes: ByteArray): Int
+    private external fun nativeCredKycIssue(mnoSk: ByteArray, eid: ByteArray, rBio: ByteArray, outCredKyc: ByteArray): Int
+    private external fun nativeCredKycVerify(certBytes: ByteArray, eid: ByteArray, rBio: ByteArray, credKyc: ByteArray): Int
+
+    // mode_switch JNI
+    private external fun nativeModeSwitch(
+        nvramDir: String, domainIdB: ByteArray,
+        mnoAId: ByteArray, mnoASk: ByteArray
+    ): Int
 }

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="pqc_primary">#2563EB</color>
+    <color name="pqc_primary">#1677FF</color>
     <color name="pqc_primary_variant">#06B6D4</color>
     <color name="pqc_success">#10B981</color>
     <color name="pqc_error">#EF4444</color>

@@ -1,0 +1,73 @@
+/*
+ * pqzk_cert.h — Simulated GSMA certificate authority
+ */
+
+#ifndef PQZK_CERT_H
+#define PQZK_CERT_H
+
+#include "pq_zk_esim.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define PQZK_GSMA_CA_PK_BYTES   32
+#define PQZK_MLDSA_SIG_BYTES    64
+#define PQZK_CERT_MLKEM_PK_BYTES     PQ_ZK_PUBLICKEY_BYTES
+#define PQZK_MNO_ID_BYTES       16
+#define PQZK_CERT_BYTES         (PQZK_MNO_ID_BYTES + 32 + 32 + 32)
+
+typedef struct {
+    uint8_t mno_id[PQZK_MNO_ID_BYTES];
+    uint8_t mno_sk[32];
+    uint8_t mno_pk[32];
+    uint8_t ca_sig[32];
+} pqzk_cert_t;
+
+/* Root CA */
+void PQZK_GSMA_GetRootCAPK(uint8_t root_ca_pk_out[PQZK_GSMA_CA_PK_BYTES]);
+
+/* Certificate operations */
+int PQZK_Cert_Issue(const uint8_t mno_id[PQZK_MNO_ID_BYTES],
+                    const uint8_t mno_sk[32],
+                    pqzk_cert_t  *cert_out);
+
+int PQZK_Cert_IssueForMNO(const uint8_t  domain_id[PQZK_MNO_ID_BYTES],
+                          pqzk_cert_t   *cert_out);
+
+int PQZK_Cert_Verify(const pqzk_cert_t *cert);
+
+int PQZK_Cert_VerifyWithRootPK(const pqzk_cert_t *cert,
+                               const uint8_t root_ca_pk[PQZK_GSMA_CA_PK_BYTES]);
+
+void PQZK_Cert_Serialize(const pqzk_cert_t *cert,
+                         uint8_t cert_bytes[PQZK_CERT_BYTES]);
+
+int PQZK_Cert_Deserialize(const uint8_t cert_bytes[PQZK_CERT_BYTES],
+                          pqzk_cert_t  *cert_out);
+
+/* CredKYC */
+int PQZK_CredKYC_Issue(const uint8_t mno_sk[32],
+                       const uint8_t eid[16],
+                       const uint8_t R_bio[32],
+                       uint8_t       cred_kyc_out[32]);
+
+int PQZK_CredKYC_Verify(const pqzk_cert_t *cert_a,
+                        const uint8_t eid[16],
+                        const uint8_t R_bio[32],
+                        const uint8_t cred_kyc[32]);
+
+/* Simulated ML-DSA (HMAC-SHA256 stand-in) */
+int PQZK_MLDSA_Sign(const uint8_t sk[32],
+                    const uint8_t *data, size_t data_len,
+                    uint8_t sig_out[PQZK_MLDSA_SIG_BYTES]);
+
+int PQZK_MLDSA_Verify(const uint8_t pk[32],
+                      const uint8_t *data, size_t data_len,
+                      const uint8_t sig[PQZK_MLDSA_SIG_BYTES]);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* PQZK_CERT_H */

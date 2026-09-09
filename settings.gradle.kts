@@ -17,10 +17,10 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        maven { url = uri("https://jitpack.io") }
     }
 }
 
 rootProject.name = "PQZKEsim"
 include(":app")
-include(":opencv")
 include(":opencv")

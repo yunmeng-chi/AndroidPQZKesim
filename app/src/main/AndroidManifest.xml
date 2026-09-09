@@ -21,6 +21,7 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <application
+        android:name=".App"
         android:allowBackup="true"
         android:extractNativeLibs="true"
         android:icon="@drawable/ic_pqc_logo"
@@ -48,12 +49,22 @@
         android:screenOrientation="portrait" />
 
 
+        <!-- uCrop Activity (manual declaration required for manifest merger) -->
         <activity
-            android:name=".DevTestActivity"
-            android:label="JNI 调试终端"
+            android:name="com.yalantis.ucrop.UCropActivity"
             android:exported="false"
-            android:screenOrientation="portrait"
-            android:theme="@style/Theme.AppCompat.Light.DarkActionBar" />
+            android:theme="@style/Theme.AppCompat.Light.NoActionBar" />
+
+        <!-- FileProvider for uCrop image cropping -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
     </application>
 
